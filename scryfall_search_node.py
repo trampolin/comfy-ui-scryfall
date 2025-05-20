@@ -1,12 +1,11 @@
-import os
-import json
 import urllib.parse
 import requests
+import logging
 
 class ScryfallSearchNode:
     """
-    ComfyUI Node für die Suche nach Magic-Karten über die Scryfall API.
-    Gibt ein Datenobjekt zurück, das von anderen Nodes verwendet werden kann.
+    ComfyUI node for searching Magic cards via the Scryfall API.
+    Returns a data object that can be used by other nodes.
     """
     
     @classmethod
@@ -15,6 +14,9 @@ class ScryfallSearchNode:
             "required": {
                 "card_name": ("STRING", {"default": "Black Lotus"}),
                 "exact_match": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "edition": ("STRING", {"default": ""}),  # Optional input for Magic edition
             }
         }
     
@@ -23,58 +25,60 @@ class ScryfallSearchNode:
     FUNCTION = "search_card"
     CATEGORY = "Scryfall"
     
-    def search_card(self, card_name, exact_match=True):
-        # URL kodieren für die API-Abfrage - mit optionaler exakter Namensuche
+    def _build_search_url(self, card_name, edition, exact_match):
         if exact_match:
-            # Verwende die Syntax "!name" für exakte Übereinstimmung
             encoded_name = urllib.parse.quote(f'!"{card_name}"')
         else:
-            # Normale Suche ohne Einschränkung auf exakten Namen
             encoded_name = urllib.parse.quote(card_name)
-        
-        search_url = f"https://api.scryfall.com/cards/search?q={encoded_name}"
-        
+        url = f"https://api.scryfall.com/cards/search?q={encoded_name}"
+        if edition:
+            encoded_edition = urllib.parse.quote(edition)
+            url += f"+set:{encoded_edition}"
+        return url
+
+    def search_card(self, card_name, edition, exact_match=True):
+        logger = logging.getLogger("ScryfallSearchNode")
+        search_url = self._build_search_url(card_name, edition, exact_match)
         try:
-            # API-Abfrage senden
             response = requests.get(search_url)
             
-            # Bei Fehler mit exakter Suche versuche eine weniger strenge Suche
+            # On error with exact search, try a less strict search
             if exact_match and response.status_code == 404:
-                print(f"Keine exakte Übereinstimmung für '{card_name}', versuche normale Suche...")
-                encoded_name = urllib.parse.quote(card_name)
-                search_url = f"https://api.scryfall.com/cards/search?q={encoded_name}"
+                logger.info(f"No exact match for '{card_name}', trying normal search...")
+                search_url = self._build_search_url(card_name, edition, False)
                 response = requests.get(search_url)
-                exact_match = False  # Setze auf False, da wir jetzt eine ungenaue Suche durchführen
+                exact_match = False  # Set to False since we are now doing a fuzzy search
             
-            # Prüfen, ob auch die ungenaue Suche fehlschlägt
+            # Check if fuzzy search also fails
             if response.status_code == 404:
-                print(f"Keine Karte mit dem Namen '{card_name}' gefunden.")
-                # Leeres Datenobjekt mit Fehlermeldung zurückgeben
-                return ({"error": f"Keine Karte gefunden: {card_name}", "found": False},)
+                logger.warning(f"No card found with the name '{card_name}'.")
+                # Return empty data object with error message
+                return ({"error": f"No card found: {card_name}", "found": False},)
             
-            response.raise_for_status()  # Fehler werfen bei anderen HTTP-Fehlern
+            response.raise_for_status()  # Raise error for other HTTP errors
             data = response.json()
             
-            # Überprüfen, ob Karten gefunden wurden
-            if data.get("total_cards", 0) == 0:
-                print(f"Keine Karten gefunden für: {card_name}")
-                return ({"error": f"Keine Karte gefunden: {card_name}", "found": False},)
+            # Check if any cards were found
+            if not data.get("data"):
+                logger.warning(f"No cards found for: {card_name}")
+                return ({"error": f"No card found: {card_name}", "found": False},)
             
-            # Erste Karte nehmen (beste Übereinstimmung)
+            # Take the first card (best match)
             card = data["data"][0]
             
-            # Namen der gefundenen Karte prüfen und warnen, wenn er nicht exakt übereinstimmt
+            # Check the name of the found card and warn if it does not match exactly
             found_card_name = card.get("name", "")
             if found_card_name.lower() != card_name.lower():
-                print(f"Warnung: Exakter Name '{card_name}' nicht gefunden. Stattdessen gefunden: '{found_card_name}'")
+                logger.warning(f"Exact name '{card_name}' not found. Found instead: '{found_card_name}'")
             
-            # Erfolgreiche Suche
+            # Successful search
             return ({"card": card, "found": True},)
             
         except Exception as e:
-            print(f"Fehler beim Abrufen der Karte '{card_name}': {str(e)}")
+            logger.error(f"Error fetching card '{card_name}': {str(e)}")
             return ({"error": str(e), "found": False},)
 
-# Definiere eigenen Typ für die Weitergabe des Suchergebnisses
-# Dieser wird von ComfyUI verwendet, um gültige Verbindungen zu identifizieren
+# Define custom type for passing the search result
+# This is used by ComfyUI to identify valid connections
 SCRYFALL_DATA_TYPE = {"SCRYFALL_DATA": ["SCRYFALL_DATA"]}
+
